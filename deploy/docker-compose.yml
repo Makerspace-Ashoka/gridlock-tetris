@@ -9,6 +9,13 @@ services:
       - "8080:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    # The LAN resolver wildcards the inherited search domain
+    # (local.makerspace.tools), so an undeployed backend such as
+    # gridlock-prod or a torn-down gridlock-pr-<n> would resolve to an
+    # unrelated host instead of NXDOMAIN, and the edge would proxy there.
+    # Dropping the search list keeps single-label lookups on Docker DNS and
+    # lets missing environments fall through to handle_errors.
+    dns_search: ["."]
     networks: [gridlock]
 
   prod:

@@ -76,7 +76,12 @@ jobs:
         run: |
           set -euo pipefail
           N="$PR_NUMBER"
-          curl --retry 6 --retry-delay 2 --retry-all-errors -fsS "http://localhost:8080/pr/$N/" | grep -qi gridlock
+          # Do not pipe curl into grep -q: grep exits at the first match and
+          # closes the pipe, so curl dies with a write error (exit 23) even
+          # though the deploy succeeded. Write to a file, then grep the file.
+          OUT="$RUNNER_TEMP/gridlock-smoke.html"
+          curl --retry 6 --retry-delay 2 --retry-all-errors -fsS "http://localhost:8080/pr/$N/" -o "$OUT"
+          grep -qi gridlock "$OUT"
 
       - name: Sticky preview comment
         uses: actions/github-script@v7
