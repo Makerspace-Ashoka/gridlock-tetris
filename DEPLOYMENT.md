@@ -117,3 +117,5 @@ docker push ghcr.io/makerspace-ashoka/gridlock-tetris:dev
 then run **Deploy Prod** again — it promotes whatever `:dev` points at.
 Alternatively, revert the offending commit on `main` (which rebuilds `:dev`)
 and run **Deploy Prod**.
+
+<!-- Pipeline verification: PR preview smoke test, 2026-08-19. Safe to remove. -->
