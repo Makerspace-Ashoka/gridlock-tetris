@@ -1,0 +1,190 @@
+name: Upstream Sync
+
+# Watches the repo we forked from and opens a PR when it gets ahead of our
+# main. The PR is only ever opened or updated here -- merging is always a
+# human decision, so nothing in this workflow merges anything.
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  # Needed to dispatch pr-preview.yml for the sync PR.
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: RishiVashistX/gridlock-tetris
+  SYNC_BRANCH: upstream-sync
+
+jobs:
+  sync:
+    name: Check upstream and open sync PR
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          UPSTREAM_URL="https://github.com/$UPSTREAM_REPO.git"
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null \
+            || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch upstream main
+          git fetch origin main
+
+      - name: Compare upstream with origin/main
+        id: compare
+        run: |
+          set -euo pipefail
+          AHEAD="$(git rev-list --count origin/main..upstream/main)"
+          UPSTREAM_SHA="$(git rev-parse upstream/main)"
+          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "upstream/main is $AHEAD commit(s) ahead of origin/main (upstream head $UPSTREAM_SHA)"
+
+      # ---------------------------------------------------------------- no-op
+      - name: Up to date - clean up stale sync branch
+        if: steps.compare.outputs.ahead == '0'
+        run: |
+          set -euo pipefail
+          OPEN_COUNT="$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq 'length')"
+          if git ls-remote --exit-code --heads origin "$SYNC_BRANCH" >/dev/null 2>&1; then
+            if [ "$OPEN_COUNT" = "0" ]; then
+              git push origin --delete "$SYNC_BRANCH"
+              echo "Deleted stale $SYNC_BRANCH branch (merged or closed, no open PR)."
+            else
+              echo "An open sync PR still references $SYNC_BRANCH; leaving the branch alone."
+            fi
+          fi
+          echo "Up to date: $UPSTREAM_REPO@main has no commits we are missing - nothing to sync."
+
+      # ------------------------------------------------------------ ahead path
+      - name: Check whether the user already declined this upstream state
+        id: guard
+        if: steps.compare.outputs.ahead != '0'
+        env:
+          UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          # Most recent closed-but-not-merged sync PR. If the user closed a PR
+          # for exactly this upstream head, respect that and stay quiet until
+          # upstream moves again.
+          DECLINED_SHA="$(gh pr list --head "$SYNC_BRANCH" --state closed \
+            --json headRefOid,mergedAt,closedAt \
+            --jq 'map(select(.mergedAt == null)) | sort_by(.closedAt) | last | .headRefOid // ""')"
+          if [ "$DECLINED_SHA" = "$UPSTREAM_SHA" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "The user closed a sync PR for upstream head $UPSTREAM_SHA without merging."
+            echo "Not re-opening it. A new PR will be raised once upstream moves further."
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push upstream head to sync branch
+        if: steps.compare.outputs.ahead != '0' && steps.guard.outputs.proceed == 'true'
+        env:
+          UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          REMOTE_SHA="$(git ls-remote origin "refs/heads/$SYNC_BRANCH" | cut -f1)"
+          if [ "$REMOTE_SHA" = "$UPSTREAM_SHA" ]; then
+            echo "origin/$SYNC_BRANCH is already at $UPSTREAM_SHA; skipping push."
+          else
+            git push -f origin "$UPSTREAM_SHA:refs/heads/$SYNC_BRANCH"
+            echo "Pushed $UPSTREAM_SHA to origin/$SYNC_BRANCH."
+          fi
+
+      - name: Open or update the sync PR
+        id: pr
+        if: steps.compare.outputs.ahead != '0' && steps.guard.outputs.proceed == 'true'
+        env:
+          AHEAD: ${{ steps.compare.outputs.ahead }}
+          UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          TITLE="Upstream sync: $AHEAD new commit(s) from $UPSTREAM_REPO"
+          BODY_FILE="$RUNNER_TEMP/upstream-sync-body.md"
+          COMMITS="$(git log --reverse \
+            --pretty=format:"- [\`%h\`](https://github.com/$UPSTREAM_REPO/commit/%H) %s" \
+            origin/main..upstream/main)"
+
+          {
+            echo '<!-- gridlock-upstream-sync -->'
+            echo "## Upstream is ahead"
+            echo ""
+            echo "[\`$UPSTREAM_REPO\`](https://github.com/$UPSTREAM_REPO) has **$AHEAD commit(s)** we do not have yet."
+            echo ""
+            echo "### New commits"
+            echo ""
+            echo "$COMMITS"
+            echo ""
+            echo "### How to merge this"
+            echo ""
+            echo "**Merge this PR with a merge commit - do NOT squash or rebase.**"
+            echo "Squashing rewrites the upstream commits into a new single commit, so our"
+            echo "history would permanently diverge from upstream and every future sync would"
+            echo "re-list these same commits as \"new\" forever. The merge-commit option keeps"
+            echo "the upstream SHAs intact, which is what the hourly comparison relies on."
+            echo ""
+            echo "Merging this PR pushes to \`main\`, which automatically builds and deploys"
+            echo "the dev environment (https://tetris.makerspace.tools/dev). Production is"
+            echo "untouched until someone runs **Deploy Prod** by hand."
+            echo ""
+            echo "This PR was opened automatically and will never be merged automatically."
+            echo "If you do not want these changes, just close it - the sync will stay quiet"
+            echo "until upstream moves again."
+          } > "$BODY_FILE"
+
+          EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // ""')"
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file "$BODY_FILE"
+            NUMBER="$EXISTING"
+            echo "Updated existing sync PR #$NUMBER."
+          else
+            gh pr create --base main --head "$SYNC_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
+            NUMBER="$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // ""')"
+            echo "Opened sync PR #$NUMBER."
+          fi
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch preview deploy for the sync PR
+        if: steps.compare.outputs.ahead != '0' && steps.guard.outputs.proceed == 'true' && steps.pr.outputs.number != ''
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          # PRs created with GITHUB_TOKEN do not emit pull_request events (the
+          # recursion block), so the preview has to be kicked off explicitly.
+          # workflow_dispatch is exempt from that block.
+          gh workflow run pr-preview.yml -f pr_number="$PR_NUMBER"
+          echo "Dispatched pr-preview.yml for PR #$PR_NUMBER."
+
+      - name: Summary
+        if: always()
+        env:
+          AHEAD: ${{ steps.compare.outputs.ahead }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Upstream sync"
+            echo ""
+            echo "- Upstream: \`$UPSTREAM_REPO@main\`"
+            echo "- Commits ahead of our main: **${AHEAD:-unknown}**"
+            if [ -n "${PR_NUMBER:-}" ]; then
+              echo "- Sync PR: #$PR_NUMBER (open until a human merges it)"
+            else
+              echo "- No sync PR needed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

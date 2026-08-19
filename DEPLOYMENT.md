@@ -40,6 +40,7 @@ deployed" page instead of a raw 502.
 | PR teardown | `.github/workflows/pr-teardown.yml` | PR closed (merged or not) | Removes `gridlock-pr-<n>`, deletes the `:pr-<n>` image, prunes dangling images |
 | Dev | `.github/workflows/deploy-dev.yml` | Push to `main` | Build + push `:dev` and `:sha-<full-sha>`, sync edge config + compose file to `/opt/gridlock`, reload edge, pull and restart `gridlock-dev`, smoke-test `/dev` |
 | Prod | `.github/workflows/deploy-prod.yml` | Manual `workflow_dispatch` | Retags the **existing** `:dev` image as `:prod`, pushes it, restarts `gridlock-prod`, smoke-tests `/`, writes the promoted digest to the run summary |
+| Upstream sync | `.github/workflows/upstream-sync.yml` | Hourly cron + manual | Opens a PR when upstream is ahead, and dispatches a preview for it. Never merges — see [Upstream sync](#upstream-sync) |
 
 Builds happen only on `ubuntu-latest`. The self-hosted runner only pulls
 images and moves containers around.
@@ -75,6 +76,33 @@ comment rather than adding new ones.
 untrusted code never reaches the self-hosted runner and never gets a registry
 token. Fork contributions must be reviewed and merged (or pushed to a branch
 in this repo) before they can be previewed.
+
+## Upstream sync
+
+This repo is a fork of
+[RishiVashistX/gridlock-tetris](https://github.com/RishiVashistX/gridlock-tetris).
+`.github/workflows/upstream-sync.yml` checks hourly (cron `17 * * * *`, plus
+manual **Run workflow**) whether upstream has commits we do not have.
+
+- If upstream is ahead, it pushes upstream's head to the `upstream-sync`
+  branch in this repo and opens — or updates — a single PR listing the new
+  commits. It also dispatches **PR Preview** for that PR, so the incoming
+  changes get a `/pr/<n>` staging deploy before anyone merges.
+- **The PR is never merged automatically.** It stays open until a human
+  merges it. Close it and the watcher stays quiet until upstream moves
+  further; it will not re-open a PR for an upstream state you already
+  declined.
+- **Merge it with a merge commit — not squash, not rebase.** Squashing
+  rewrites the upstream commits under new SHAs, so our history permanently
+  diverges from upstream and every later sync re-lists the same old commits
+  as new. Merging normally keeps the upstream SHAs, which is what the hourly
+  comparison relies on.
+- Merging lands on `main`, which triggers **Deploy Dev** as usual. Production
+  still requires the manual promotion.
+
+Note: GitHub disables scheduled workflows after **60 days without repository
+activity**. If the sync goes quiet, re-enable it from the **Actions** tab
+(select "Upstream Sync" → enable workflow).
 
 ## Server layout
 
