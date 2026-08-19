@@ -1,0 +1,29 @@
+name: gridlock
+
+services:
+  edge:
+    image: caddy:2-alpine
+    container_name: gridlock-edge
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks: [gridlock]
+
+  prod:
+    image: ghcr.io/makerspace-ashoka/gridlock-tetris:prod
+    container_name: gridlock-prod
+    restart: unless-stopped
+    networks: [gridlock]
+
+  dev:
+    image: ghcr.io/makerspace-ashoka/gridlock-tetris:dev
+    container_name: gridlock-dev
+    restart: unless-stopped
+    networks: [gridlock]
+
+networks:
+  gridlock:
+    name: gridlock
+    external: true

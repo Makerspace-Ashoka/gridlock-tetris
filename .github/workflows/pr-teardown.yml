@@ -1,0 +1,27 @@
+name: PR Teardown
+
+on:
+  pull_request:
+    types: [closed]
+
+env:
+  IMAGE: ghcr.io/makerspace-ashoka/gridlock-tetris
+
+jobs:
+  teardown:
+    name: Remove preview environment
+    # Fork PRs never reach the self-hosted runner.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, gridlock]
+    permissions:
+      contents: read
+    steps:
+      - name: Stop and remove preview container and image
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          N="$PR_NUMBER"
+          docker rm -f "gridlock-pr-$N" || true
+          docker rmi "$IMAGE:pr-$N" || true
+          docker image prune -f

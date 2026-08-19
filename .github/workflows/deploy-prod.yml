@@ -1,0 +1,60 @@
+name: Deploy Prod
+
+# Manual promotion gate: retags the EXACT image currently published as :dev
+# to :prod. There is no rebuild here, so what was tested on /dev is what ships.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/makerspace-ashoka/gridlock-tetris
+  DEPLOY_DIR: /opt/gridlock
+
+jobs:
+  promote:
+    name: Promote dev to prod
+    runs-on: [self-hosted, gridlock]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote image
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE:dev"
+          docker tag "$IMAGE:dev" "$IMAGE:prod"
+          docker push "$IMAGE:prod"
+
+      - name: Restart prod container
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          docker compose up -d prod
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          curl --retry 6 --retry-delay 2 --retry-all-errors -fsS http://localhost:8080/ | grep -qi gridlock
+
+      - name: Record promoted image
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE:prod" \
+            | grep "^$IMAGE@" | head -n1 || true)"
+          {
+            echo "## GRIDLOCK promoted to production"
+            echo ""
+            echo "- Image: \`$IMAGE:prod\`"
+            echo "- Digest: \`${DIGEST:-unknown}\`"
+            echo "- Live: https://tetris.makerspace.tools/"
+          } >> "$GITHUB_STEP_SUMMARY"

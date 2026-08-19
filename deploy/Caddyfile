@@ -1,0 +1,20 @@
+:80 {
+	@pr path_regexp pr ^/pr/(\d+)($|/)
+	handle @pr {
+		reverse_proxy gridlock-pr-{re.pr.1}:80
+	}
+
+	@dev path /dev /dev/*
+	handle @dev {
+		reverse_proxy gridlock-dev:80
+	}
+
+	handle {
+		reverse_proxy gridlock-prod:80
+	}
+
+	handle_errors {
+		header Content-Type "text/html; charset=utf-8"
+		respond "<h1>GRIDLOCK</h1><p>This environment is not currently deployed ({err.status_code}).</p>" {err.status_code}
+	}
+}
